@@ -1,15 +1,25 @@
 """
 Created on Sun Feb 14 12:26:06 2021
-
+Updated on Sun Jul 02 13:45:00 2023
 @author: Jim McKeown
 """
 
-import math
-import numpy as np
 import cv2
+import socket
+import extract_angle
 
-activeSize = 100
+# Connect to the server with `telnet localhost 5000`.
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setblocking(False)
+server.bind(('localhost', 5000))
+server.listen(5)
+
+connections = []
+
+activeSize = 50
 threshold = 180
+N_min = 30
 
 cap = cv2.VideoCapture(0)
 
@@ -20,17 +30,10 @@ if not cap.isOpened():
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-def normalize(rawAngle):
-    if rawAngle >= 360.0:
-        return rawAngle - 360.0
-    if rawAngle < 0.0:
-        return rawAngle + 360.0
-    return rawAngle
-
-
 # main loop
 while(True):
     # Capture a frame
+    
     ret, frame = cap.read()
     
     # convert color to grey-scale
@@ -54,87 +57,42 @@ while(True):
     cv2.line(frame, pt1=(centerX, Ylr), pt2=(centerX, height - 1), color=(0,255,0), thickness=1)
     
     # slice the active area from grey-scale image
-    active = gray[Yul+1:Ylr, Xul+1:Xlr]
+    active = gray[Yul:Ylr, Xul:Xlr]
     # convert active area to binary
     (thresh, active) = cv2.threshold(active, threshold, 255, cv2.THRESH_BINARY)
 
-    # create empty arrays to hold edge data
-    siVHtL = np.empty(shape = [0,2], dtype = float)    
-    siVLtH = np.empty(shape = [0,2], dtype = float) 
-    siHHtL = np.empty(shape = [0,2], dtype = float)    
-    siHLtH = np.empty(shape = [0,2], dtype = float) 
-
-    # vertical scan top to bottom
-    for x in range(activeSize - 1):
-        lastPixel = -1
-        currentLineHtL = np.empty(shape = [0,2], dtype = float)
-        currentLineLtH = np.empty(shape = [0,2], dtype = float)
-        for y in range(activeSize - 1):
-            # detect high to low transition
-            currentPixel = active[y,x]
-            if lastPixel == 255 and currentPixel == 0:
-                # add coordinates to vertical high to low array (045-315)
-                currentLineHtL = np.concatenate((currentLineHtL,(np.array([float(x), float(0-y)], ndmin=2))))
-            if lastPixel == 0 and currentPixel == 255:
-                # add coordinates to vertical low to high array (135-225)
-                currentLineLtH = np.concatenate((currentLineLtH,(np.array([float(x), float(0-y)], ndmin=2))))
-            lastPixel = currentPixel
-        if currentLineHtL.shape[0] == 1:
-            siVHtL = np.vstack((siVHtL, currentLineHtL))
-        if currentLineLtH.shape[0] == 1:
-            siVLtH = np.vstack((siVLtH, currentLineLtH))
-
-
-    # horizontal scan left to right
-    for y in range(activeSize - 1):
-        lastPixel = -1
-        currentLineHtL = np.empty(shape = [0,2], dtype = float)
-        currentLineLtH = np.empty(shape = [0,2], dtype = float)        
-        for x in range(activeSize - 1):
-            # detect high to low transition
-            currentPixel = active[y,x]
-            if lastPixel == 255 and currentPixel == 0:
-                # add coordinates to horizontal high to low array (225-315)
-                currentLineHtL = np.concatenate((currentLineHtL,(np.array([float(x), float(y)], ndmin=2))))
-            if lastPixel == 0 and currentPixel == 255:
-                # add coordinates to vertical low to high array (045-135)
-                currentLineLtH = np.concatenate((currentLineLtH,(np.array([float(x), float(y)], ndmin=2))))
-            lastPixel = currentPixel
-        if currentLineHtL.shape[0] == 1:
-            siHHtL = np.vstack((siHHtL, currentLineHtL))
-        if currentLineLtH.shape[0] == 1:
-            siHLtH = np.vstack((siHLtH, currentLineLtH))
-
-    # find longest line of data and calculate slope and y-intercept
-    angle = 0.0
-    sector = ""
-    if siVHtL.shape >= siVLtH.shape and siVHtL.shape >= siHLtH.shape and siVHtL.shape >= siHHtL.shape:
-        model = np.polyfit(siVHtL[:,0],siVHtL[:,1],1)
-        angle = normalize(math.degrees(math.atan(model[0])))
-        sector = "315 - 045"
-    if siVLtH.shape > siVHtL.shape and siVLtH.shape >= siHLtH.shape and siVLtH.shape >= siHHtL.shape:
-        model = np.polyfit(siVLtH[:,0],siVLtH[:,1],1)
-        angle = normalize(math.degrees(math.atan(model[0])) + 180.0)
-        sector = "135 - 225"
-    if siHHtL.shape > siHLtH.shape and siHHtL.shape > siVLtH.shape and siHHtL.shape > siVHtL.shape:
-        model = np.polyfit(siHHtL[:,1],siHHtL[:,0],1)
-        angle = normalize(math.degrees(math.atan(model[0])) + 90.0)
-        sector = "045 - 135"
-    if siHLtH.shape > siHHtL.shape and siHLtH.shape >= siVLtH.shape and siHLtH.shape >= siVHtL.shape:
-        model = np.polyfit(siHLtH[:,1],siHLtH[:,0],1)
-        angle = normalize(math.degrees(math.atan(model[0])) + 270.0)
-        sector = "225 - 315"
-    print(sector, angle)
+    # get angle from active area array
+    angle, std_err, sector = extract_angle.getAngle(active, N_min)    
+    print(angle, std_err, sector)
     
     # Display the resulting frame
     cv2.imshow('Rotary Encoder', frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
+    
+    # Send numerical result to telnet client
+    try:
+        connection, address = server.accept()
+        connection.setblocking(False)
+        connections.append(connection)
+    except BlockingIOError:
+        pass
+
+    for connection in connections:
+        try:
+            command = connection.recv(4096)
+        except BlockingIOError:
+            continue
+            for connection in connections:
+                #connection.send(bytes(('%3.1f\n\r' % angle),'UTF-8'))
+                connection.send(bytes('{:0>5.1f}\n\r'.format(command), 'UTF-8'))
+        except BrokenPipeError:
+            continue        
 
 # When everything done, release the capture
+server.close()
 cap.release()
 cv2.destroyAllWindows()
-
 
 
 
